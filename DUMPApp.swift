@@ -28,6 +28,9 @@ final class PrivacyDelegate: NSObject, UIApplicationDelegate {
     private var observers: [NSObjectProtocol] = []
     private let shieldTag = 70020715
 
+    // Prevent duplicate background handling.
+    private var backgroundLockHandled = false
+
     // MARK: - Launch
 
     func application(
@@ -37,13 +40,14 @@ final class PrivacyDelegate: NSObject, UIApplicationDelegate {
     ) -> Bool {
 
         /*
-         TEMPORARILY INACTIVE
+         TEMPORARY SCENE DEACTIVATION
 
-         Face ID and other system interfaces can cause the scene
-         to temporarily deactivate.
+         Face ID and other iOS system interfaces can temporarily
+         deactivate the scene.
 
-         We protect what is visible with the privacy shield,
-         but DO NOT destroy the authentication session.
+         IMPORTANT:
+         We hide the application's contents, but we DO NOT lock
+         the vault and DO NOT cancel the authentication session.
          */
         observers.append(
             NotificationCenter.default.addObserver(
@@ -60,20 +64,38 @@ final class PrivacyDelegate: NSObject, UIApplicationDelegate {
         )
 
         /*
-         ACTUAL BACKGROUND
+         SCENE ACTIVE AGAIN
 
-         This is a genuine security transition.
+         Face ID can temporarily deactivate the scene.
 
-         Now we:
-         - cover the UI
-         - invalidate the session
-         - cancel authentication
-         - revoke the lease
-         - return to the decoy lock
+         Once iOS tells us the scene is active again, the privacy
+         shield can be removed as long as screen capture is not active.
          */
         observers.append(
             NotificationCenter.default.addObserver(
-                forName: UIScene.didEnterBackgroundNotification,
+                forName: UIScene.didActivateNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+
+                MainActor.assumeIsolated {
+                    self?.backgroundLockHandled = false
+                    self?.sceneDidActivate()
+                }
+            }
+        )
+
+        /*
+         Protected data becoming unavailable is a genuine
+         security event.
+
+         In this situation the vault should immediately lock.
+         */
+        observers.append(
+            NotificationCenter.default.addObserver(
+                forName:
+                    UIApplication
+                        .protectedDataWillBecomeUnavailableNotification,
                 object: nil,
                 queue: .main
             ) { [weak self] _ in
@@ -86,49 +108,12 @@ final class PrivacyDelegate: NSObject, UIApplicationDelegate {
         )
 
         /*
-         SCENE ACTIVE AGAIN
-
-         Face ID can cause temporary scene inactivity.
-
-         When the scene becomes active again, remove the privacy
-         shield immediately unless screen capture is active.
-
-         IMPORTANT:
-         We deliberately do NOT check
-         UIApplication.shared.applicationState here before uncovering.
-         UIScene.didActivateNotification already tells us that this
-         scene has become active.
+         Screen recording / mirroring changed.
          */
         observers.append(
             NotificationCenter.default.addObserver(
-                forName: UIScene.didActivateNotification,
-                object: nil,
-                queue: .main
-            ) { [weak self] _ in
-
-                MainActor.assumeIsolated {
-                    self?.sceneDidActivate()
-                }
-            }
-        )
-
-        // Screen recording / mirroring state changed.
-        observers.append(
-            NotificationCenter.default.addObserver(
-                forName: UIApplication.protectedDataWillBecomeUnavailableNotification,
-                object: nil,
-                queue: .main
-            ) { [weak self] _ in
-                MainActor.assumeIsolated {
-                    self?.cover()
-                    self?.model?.lock()
-                }
-            }
-        )
-
-        observers.append(
-            NotificationCenter.default.addObserver(
-                forName: UIScreen.capturedDidChangeNotification,
+                forName:
+                    UIScreen.capturedDidChangeNotification,
                 object: nil,
                 queue: .main
             ) { [weak self] _ in
@@ -139,10 +124,18 @@ final class PrivacyDelegate: NSObject, UIApplicationDelegate {
             }
         )
 
-        // Screenshot warning.
+        /*
+         Screenshot warning.
+
+         iOS does not allow an application to retroactively
+         prevent a screenshot once the screenshot event fires,
+         so we notify the user.
+         */
         observers.append(
             NotificationCenter.default.addObserver(
-                forName: UIApplication.userDidTakeScreenshotNotification,
+                forName:
+                    UIApplication
+                        .userDidTakeScreenshotNotification,
                 object: nil,
                 queue: .main
             ) { [weak self] _ in
@@ -154,6 +147,13 @@ final class PrivacyDelegate: NSObject, UIApplicationDelegate {
         )
 
         return true
+    }
+
+    deinit {
+
+        for observer in observers {
+            NotificationCenter.default.removeObserver(observer)
+        }
     }
 
     // MARK: - Windows
@@ -235,30 +235,28 @@ final class PrivacyDelegate: NSObject, UIApplicationDelegate {
     private func sceneDidActivate() {
 
         /*
-         If the screen is actively being captured,
-         never reveal DUMP.
+         NEVER reveal the application while iOS reports
+         active screen capture / mirroring.
          */
         if UIScreen.screens.contains(
             where: \.isCaptured
         ) {
 
             cover()
-
             model?.lock()
-
-        } else {
-
-            /*
-             The scene has explicitly reported that it is active.
-
-             Remove the native privacy shield immediately.
-
-             This is especially important after Face ID succeeds:
-             the SwiftUI interface underneath may already have moved
-             from Gate 1 to Setup/Gate 2.
-             */
-            uncover()
+            return
         }
+
+        /*
+         Scene is active and no screen capture is occurring.
+
+         This is important for Face ID:
+         Face ID may temporarily deactivate the scene, but that
+         should only display the privacy shield.
+
+         It must NOT destroy the authentication session.
+         */
+        uncover()
     }
 
     // MARK: - Screen Capture
@@ -270,15 +268,16 @@ final class PrivacyDelegate: NSObject, UIApplicationDelegate {
         ) {
 
             cover()
-
             model?.lock()
 
             return
         }
 
         /*
-         This method can also be called from onAppear, where checking
-         the application state is appropriate.
+         onAppear can call this method.
+
+         Only reveal the application if iOS says it is
+         currently active.
          */
         if UIApplication.shared.applicationState == .active {
 
@@ -378,13 +377,23 @@ final class PrivacyDelegate: NSObject, UIApplicationDelegate {
     ) {
 
         /*
+         CRITICAL FOR FACE ID
+
          DO NOT call model.lock() here.
 
-         Face ID can temporarily make the application inactive.
+         Face ID can temporarily cause the application to resign
+         active status.
 
-         We only hide the contents.
+         Locking here would:
+         - increment AppModel.generation
+         - revoke SessionLease
+         - cancel LAContext
+         - invalidate the successful Face ID result
+
+         We therefore ONLY hide sensitive content.
          */
         cover()
+
         model?.suspendCameraCapture()
     }
 
@@ -393,11 +402,25 @@ final class PrivacyDelegate: NSObject, UIApplicationDelegate {
     ) {
 
         /*
-         Genuine background transition.
+         REAL BACKGROUND TRANSITION
 
-         This is where the security session must be destroyed.
+         Unlike resignActive, this means the application actually
+         entered the background.
+
+         Now it is appropriate to destroy the security session.
          */
+
         cover()
+
+        /*
+         Prevent duplicate lifecycle callbacks from locking the
+         same session multiple times.
+         */
+        guard !backgroundLockHandled else {
+            return
+        }
+
+        backgroundLockHandled = true
 
         model?.lock()
     }
@@ -407,10 +430,13 @@ final class PrivacyDelegate: NSObject, UIApplicationDelegate {
     ) {
 
         /*
-         The application is active again.
+         Application is active again.
 
-         Remove the shield unless screen capture is active.
+         This also happens after Face ID disappears.
          */
+
+        backgroundLockHandled = false
+
         sceneDidActivate()
     }
 }
