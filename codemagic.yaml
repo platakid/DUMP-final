@@ -15,10 +15,7 @@ workflows:
 
           echo "Creating Xcode project..."
 
-          # --------------------------------------------------
           # Reconstruct DUMP.xcodeproj
-          # --------------------------------------------------
-
           mkdir -p DUMP.xcodeproj/xcshareddata/xcschemes
 
           cp project.pbxproj \
@@ -27,28 +24,19 @@ workflows:
           cp DUMP.xcscheme \
             DUMP.xcodeproj/xcshareddata/xcschemes/DUMP.xcscheme
 
-          # --------------------------------------------------
-          # Create directory structure expected by pbxproj
-          # --------------------------------------------------
-
+          # Create directory structure expected by project.pbxproj
           mkdir -p DUMP/DUMP/Media
           mkdir -p DUMP/DUMP/Notes
           mkdir -p DUMP/DUMP/Security
           mkdir -p DUMP/DUMP/Storage
           mkdir -p DUMP/DUMP/UI
 
-          # --------------------------------------------------
           # Main application files
-          # --------------------------------------------------
-
           cp AppModel.swift DUMP/DUMP/AppModel.swift
           cp DUMPApp.swift DUMP/DUMP/DUMPApp.swift
           cp Info.plist DUMP/DUMP/Info.plist
 
-          # --------------------------------------------------
           # Media
-          # --------------------------------------------------
-
           cp MediaPreview.swift DUMP/DUMP/Media/MediaPreview.swift
           cp PhotosExporter.swift DUMP/DUMP/Media/PhotosExporter.swift
           cp PhotosImporter.swift DUMP/DUMP/Media/PhotosImporter.swift
@@ -57,38 +45,23 @@ workflows:
           cp SecureVideoEncoder.swift DUMP/DUMP/Media/SecureVideoEncoder.swift
           cp SecureVideoPlayback.swift DUMP/DUMP/Media/SecureVideoPlayback.swift
 
-          # --------------------------------------------------
           # Notes
-          # --------------------------------------------------
-
           cp NoteEditor.swift DUMP/DUMP/Notes/NoteEditor.swift
           cp NotesStore.swift DUMP/DUMP/Notes/NotesStore.swift
 
-          # --------------------------------------------------
           # Security
-          # --------------------------------------------------
-
           cp Crypto.swift DUMP/DUMP/Security/Crypto.swift
           cp DeviceAuthentication.swift DUMP/DUMP/Security/DeviceAuthentication.swift
           cp KeychainStore.swift DUMP/DUMP/Security/KeychainStore.swift
 
-          # --------------------------------------------------
           # Storage
-          # --------------------------------------------------
-
           cp MediaStore.swift DUMP/DUMP/Storage/MediaStore.swift
 
-          # --------------------------------------------------
           # UI
-          # --------------------------------------------------
-
           cp RootView.swift DUMP/DUMP/UI/RootView.swift
           cp VaultView.swift DUMP/DUMP/UI/VaultView.swift
 
-          # --------------------------------------------------
           # Create Assets.xcassets
-          # --------------------------------------------------
-
           mkdir -p DUMP/DUMP/Assets.xcassets/AppIcon.appiconset
 
           cat > DUMP/DUMP/Assets.xcassets/Contents.json <<'EOF'
@@ -120,7 +93,7 @@ workflows:
           }
           EOF
 
-          echo "Project structure created."
+          echo "Project structure created successfully."
 
           find DUMP -maxdepth 4 -type f -print
 
@@ -147,6 +120,7 @@ workflows:
             -configuration Release \
             -sdk iphoneos \
             -destination "generic/platform=iOS" \
+            IPHONEOS_DEPLOYMENT_TARGET=17.4 \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
@@ -169,6 +143,7 @@ workflows:
             -sdk iphoneos \
             -archivePath build/ios/DUMP.xcarchive \
             -destination "generic/platform=iOS" \
+            IPHONEOS_DEPLOYMENT_TARGET=17.4 \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
@@ -185,19 +160,24 @@ workflows:
 
           if [ ! -d "$APP" ]; then
             echo "ERROR: DUMP.app was not produced."
+
+            echo "Available .app files:"
             find build -name "*.app" -print || true
+
             exit 1
           fi
 
           rm -rf build/ios/ipa
           mkdir -p build/ios/ipa/Payload
 
-          cp -R "$APP" build/ios/ipa/Payload/DUMP.app
+          cp -R "$APP" \
+            build/ios/ipa/Payload/DUMP.app
 
           cd build/ios/ipa
 
           zip -r DUMP-unsigned.ipa Payload
 
+          echo ""
           echo "================================"
           echo "DUMP-unsigned.ipa CREATED"
           echo "================================"
