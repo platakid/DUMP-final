@@ -7,7 +7,31 @@ workflows:
       xcode: latest
     scripts:
       - name: Check project and resolve Swift packages
-        script: bash ci/codemagic.sh prepare
+  script: |
+    set -e
+    cd "$CM_BUILD_DIR"
+
+    if [ -f "ci/codemagic.sh" ]; then
+      chmod +x ci/codemagic.sh
+      bash ci/codemagic.sh prepare
+    else
+      echo "ci/codemagic.sh not found — resolving packages directly."
+
+      if [ -d "ios/App/App.xcworkspace" ]; then
+        xcodebuild \
+          -workspace ios/App/App.xcworkspace \
+          -scheme App \
+          -resolvePackageDependencies
+      elif [ -d "ios/App/App.xcodeproj" ]; then
+        xcodebuild \
+          -project ios/App/App.xcodeproj \
+          -scheme App \
+          -resolvePackageDependencies
+      else
+        echo "ERROR: No Xcode workspace/project found."
+        exit 1
+      fi
+    fi
 
       - name: Build and run XCTest on simulator (sanity check)
         script: bash ci/codemagic.sh test
