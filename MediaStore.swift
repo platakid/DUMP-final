@@ -264,6 +264,16 @@ struct MediaStore {
     }
 
 
+    // Recovery is stricter than media detection: unknown and hidden files also
+    // block resetting credentials, since they may belong to an older version.
+    func isEmptyForCredentialReset() throws -> Bool {
+        try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil,
+            options: []
+        ).isEmpty
+    }
+
     // MARK: List
 
     func list(

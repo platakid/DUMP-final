@@ -4,7 +4,10 @@ import XCTest
 final class MemoryRecords: KeyRecordStore {
     var record: KeyRecord?
     var reads = 0
-    func read() throws -> KeyRecord? { reads += 1; return record }
+    var deletes = 0
+    var unreadable = false
+    func delete() throws { deletes += 1; record = nil; unreadable = false }
+    func read() throws -> KeyRecord? { reads += 1; if unreadable { throw VaultError.damaged }; return record }
     func insert(_ record: KeyRecord) throws {
         guard self.record == nil else { throw VaultError.storage }
         self.record = record
@@ -78,6 +81,88 @@ final class SecurityTests: XCTestCase {
             _ = try await credentials.unlock(password: SecretBytes(password: "first-secure-pass1!"), lease: lease)
             XCTFail("Old passcode must no longer unlock")
         } catch { XCTAssertTrue(error is VaultError) }
+    }
+
+    @MainActor func testResetRecoversUnreadableCredentialsOnlyAfterFaceID() async {
+        let records = MemoryRecords(); records.unreadable = true
+        let auth = FakeDeviceAuth()
+        let model = AppModel(auth: auth, store: store, credentials: Credentials(
+            store: records, hasMedia: { false }, isEmptyForReset: { true }
+        ))
+        XCTAssertTrue(model.unlockDecoy("7002")); model.reveal()
+        await model.enter()
+        XCTAssertEqual(model.route, .landing)
+        XCTAssertEqual(records.deletes, 0)
+        await model.enter(resetEmptyVault: true)
+        XCTAssertEqual(auth.calls, 2)
+        XCTAssertEqual(records.deletes, 1)
+        XCTAssertEqual(model.route, .setup)
+        XCTAssertNil(model.message)
+    }
+
+    @MainActor func testResetDoesNotDeleteWhenFaceIDFails() async {
+        let records = MemoryRecords(); records.unreadable = true
+        let auth = FakeDeviceAuth(); auth.success = false
+        let model = AppModel(auth: auth, store: store, credentials: Credentials(
+            store: records, hasMedia: { false }, isEmptyForReset: { true }
+        ))
+        XCTAssertTrue(model.unlockDecoy("7002")); model.reveal()
+        await model.enter(resetEmptyVault: true)
+        XCTAssertEqual(records.deletes, 0)
+        XCTAssertTrue(records.unreadable)
+        XCTAssertEqual(model.route, .landing)
+    }
+
+    @MainActor func testLateResetAuthenticationCannotDeleteAfterLock() async {
+        let records = MemoryRecords()
+        let auth = FakeDeviceAuth(); auth.suspended = true
+        let model = AppModel(auth: auth, store: store, credentials: Credentials(
+            store: records, hasMedia: { false }, isEmptyForReset: { true }
+        ))
+        XCTAssertTrue(model.unlockDecoy("7002")); model.reveal()
+        let task = Task { await model.enter(resetEmptyVault: true) }
+        while auth.continuation == nil { await Task.yield() }
+        model.lock()
+        auth.continuation?.resume(returning: true)
+        await task.value
+        XCTAssertEqual(records.deletes, 0)
+        XCTAssertEqual(model.route, .decoyLock)
+    }
+
+    func testResetRejectsEveryFileIncludingUnknownAndHiddenFiles() async throws {
+        let storage = store!
+        let records = MemoryRecords()
+        let credentials = Credentials(store: records, hasMedia: { false },
+            isEmptyForReset: { try storage.isEmptyForCredentialReset() })
+        for name in ["saved.dump", "interrupted.partial", "older-format.bin", ".hidden"] {
+            let url = storage.directory.appendingPathComponent(name)
+            try Data([1]).write(to: url)
+            do {
+                try await credentials.resetEmptyVault(lease: SessionLease())
+                XCTFail("Reset must refuse a nonempty vault")
+            } catch { XCTAssertTrue(error is EmptyVaultResetError) }
+            XCTAssertEqual(records.deletes, 0)
+            try FileManager.default.removeItem(at: url)
+        }
+        try await credentials.resetEmptyVault(lease: SessionLease())
+        XCTAssertEqual(records.deletes, 1)
+    }
+
+    func testResetDoesNotDeleteWhenFolderCannotBeCheckedOrLeaseRevoked() async {
+        let records = MemoryRecords()
+        let unreadable = Credentials(store: records, hasMedia: { false },
+            isEmptyForReset: { throw VaultError.storage })
+        do {
+            try await unreadable.resetEmptyVault(lease: SessionLease())
+            XCTFail("Reset must fail when folder inspection fails")
+        } catch {}
+        let empty = Credentials(store: records, hasMedia: { false }, isEmptyForReset: { true })
+        let lease = SessionLease(); lease.revoke()
+        do {
+            try await empty.resetEmptyVault(lease: lease)
+            XCTFail("A revoked session must not delete credentials")
+        } catch {}
+        XCTAssertEqual(records.deletes, 0)
     }
 
     @MainActor func testGate2UnreachableWhenGate1Fails() async {

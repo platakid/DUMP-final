@@ -58,6 +58,9 @@ final class AppModel: ObservableObject {
             }
 
             return try storage.containsFiles()
+        }, isEmptyForReset: {
+            guard let storage else { throw VaultError.storage }
+            return try storage.isEmptyForCredentialReset()
         })
     }
 
@@ -93,7 +96,7 @@ final class AppModel: ObservableObject {
 
     // MARK: - Gate 1
 
-    func enter() async {
+    func enter(resetEmptyVault: Bool = false) async {
         guard route == .landing, !busy else {
             return
         }
@@ -160,6 +163,14 @@ final class AppModel: ObservableObject {
             try current.check()
 
             gate1Succeeded = true
+
+            if resetEmptyVault {
+                try await credentials.resetEmptyVault(lease: current)
+                guard ticket == generation, route == .gate1, lease === current else {
+                    return
+                }
+                try current.check()
+            }
 
             // STEP 2 — Check whether vault credentials already exist.
             let existing = try await credentials.exists(

@@ -3,6 +3,7 @@ import SwiftUI
 struct RootView: View {
 
     @ObservedObject var model: AppModel
+    @State private var confirmEmptyVaultReset = false
 
     var body: some View {
 
@@ -50,6 +51,23 @@ struct RootView: View {
                     .buttonStyle(
                         PrimaryButton()
                     )
+
+                    Button("Reset empty vault", role: .destructive) {
+                        confirmEmptyVaultReset = true
+                    }
+                    .disabled(model.busy)
+                    .confirmationDialog(
+                        "Remove the old vault password?",
+                        isPresented: $confirmEmptyVaultReset,
+                        titleVisibility: .visible
+                    ) {
+                        Button("Reset empty vault", role: .destructive) {
+                            Task { await model.enter(resetEmptyVault: true) }
+                        }
+                        Button("Cancel", role: .cancel) {}
+                    } message: {
+                        Text("After Face ID, DUMP will remove the old password only if the vault folder is completely empty. You can then create a new password.")
+                    }
 
                     if let revision = Bundle.main.object(
                         forInfoDictionaryKey: "DUMPSourceRevision"

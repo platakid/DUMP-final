@@ -36,6 +36,17 @@ protocol KeyRecordStore {
     func insert(_ record: KeyRecord) throws
 
     func update(_ record: KeyRecord) throws
+    func delete() throws
+}
+
+extension KeyRecordStore {
+    func delete() throws { throw VaultError.unavailable }
+}
+
+struct EmptyVaultResetError: LocalizedError {
+    var errorDescription: String? {
+        "Reset is unavailable because the vault contains files. Existing credentials were kept."
+    }
 }
 
 
@@ -206,6 +217,14 @@ struct KeychainStore: KeyRecordStore {
     }
 
 
+    // Delete only DUMP's credential record, including an unreadable old record.
+    func delete() throws {
+        let status = SecItemDelete(query as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw NSError(domain: NSOSStatusErrorDomain, code: Int(status))
+        }
+    }
+
     // MARK: Validation
 
     private func validate(
@@ -305,6 +324,7 @@ actor Credentials {
     /// This prevents deleting/corrupting the credential record from
     /// turning an existing vault into a fresh setup.
     private let hasMedia: () throws -> Bool
+    private let isEmptyForReset: () throws -> Bool
 
     /// Domain separation for the encrypted master key.
     private let wrapAAD =
@@ -313,11 +333,13 @@ actor Credentials {
 
     init(
         store: KeyRecordStore = KeychainStore(),
-        hasMedia: @escaping () throws -> Bool
+        hasMedia: @escaping () throws -> Bool,
+        isEmptyForReset: @escaping () throws -> Bool = { false }
     ) {
 
         self.store = store
         self.hasMedia = hasMedia
+        self.isEmptyForReset = isEmptyForReset
     }
 
 
@@ -347,6 +369,15 @@ actor Credentials {
         return record != nil
     }
 
+
+    // Called only after explicit confirmation and fresh device authentication.
+    func resetEmptyVault(lease: SessionLease) throws {
+        try lease.commit {
+            // Check immediately before deletion. Enumeration failures also abort.
+            guard try isEmptyForReset() else { throw EmptyVaultResetError() }
+            try store.delete()
+        }
+    }
 
     // MARK: Create vault
 
