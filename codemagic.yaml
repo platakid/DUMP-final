@@ -8,32 +8,54 @@ workflows:
       xcode: latest
 
     scripts:
-      - name: Check project and resolve Swift packages
+      - name: Reconstruct Xcode project
         script: |
           set -euo pipefail
 
-          echo "Current directory:"
-          pwd
+          cd "$CM_BUILD_DIR"
 
-          echo "Repository contents:"
-          ls -la
+          echo "Reconstructing DUMP.xcodeproj..."
 
-          if [ ! -d "DUMP.xcodeproj" ]; then
-            echo "ERROR: DUMP.xcodeproj was not found in the repository root."
-            find . -maxdepth 3 -name "*.xcodeproj" -print
+          if [ ! -f "project.pbxproj" ]; then
+            echo "ERROR: project.pbxproj not found."
             exit 1
           fi
 
-          echo "DUMP.xcodeproj found."
+          mkdir -p DUMP.xcodeproj/xcshareddata/xcschemes
+
+          cp project.pbxproj DUMP.xcodeproj/project.pbxproj
+
+          if [ -f "DUMP.xcscheme" ]; then
+            cp DUMP.xcscheme \
+              DUMP.xcodeproj/xcshareddata/xcschemes/DUMP.xcscheme
+          fi
+
+          echo "Xcode project structure:"
+          find DUMP.xcodeproj -maxdepth 4 -type f -print
+
+          echo "Checking Xcode project..."
 
           xcodebuild \
             -project DUMP.xcodeproj \
             -scheme DUMP \
             -resolvePackageDependencies
 
-      - name: Build project sanity check
+      - name: Check available schemes
         script: |
           set -euo pipefail
+
+          cd "$CM_BUILD_DIR"
+
+          echo "Available Xcode configuration:"
+          xcodebuild \
+            -project DUMP.xcodeproj \
+            -list
+
+      - name: Build DUMP
+        script: |
+          set -euo pipefail
+
+          cd "$CM_BUILD_DIR"
 
           mkdir -p build/logs
 
@@ -49,9 +71,11 @@ workflows:
             build \
             | tee build/logs/build.log
 
-      - name: Archive for iOS device, code signing disabled
+      - name: Archive DUMP
         script: |
           set -euo pipefail
+
+          cd "$CM_BUILD_DIR"
 
           mkdir -p build/ios
           mkdir -p build/logs
@@ -69,30 +93,39 @@ workflows:
             DEVELOPMENT_TEAM="" \
             | tee build/logs/archive.log
 
-      - name: Package unsigned app into IPA
+      - name: Create unsigned IPA
         script: |
           set -euo pipefail
+
+          cd "$CM_BUILD_DIR"
 
           APP_PATH="build/ios/DUMP.xcarchive/Products/Applications/DUMP.app"
 
           if [ ! -d "$APP_PATH" ]; then
             echo "ERROR: DUMP.app was not generated."
-            find build -maxdepth 6 -name "*.app" -print || true
+
+            echo "Available .app files:"
+            find build -name "*.app" -print || true
+
             exit 1
           fi
 
           rm -rf build/ios/ipa
           mkdir -p build/ios/ipa/Payload
 
-          cp -R "$APP_PATH" build/ios/ipa/Payload/
+          cp -R "$APP_PATH" \
+            build/ios/ipa/Payload/DUMP.app
 
           cd build/ios/ipa
+
           zip -r DUMP-unsigned.ipa Payload
 
-          echo "IPA created successfully:"
+          echo ""
+          echo "=============================="
+          echo "IPA CREATED SUCCESSFULLY"
+          echo "=============================="
           ls -lh DUMP-unsigned.ipa
 
     artifacts:
       - build/ios/ipa/*.ipa
-      - build/results/*.xcresult
       - build/logs/*.log
