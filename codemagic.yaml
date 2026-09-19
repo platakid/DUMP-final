@@ -36,6 +36,11 @@ workflows:
           cp DUMPApp.swift DUMP/DUMP/DUMPApp.swift
           cp Info.plist DUMP/DUMP/Info.plist
 
+          # Identify the exact source revision in the installed app.
+          SOURCE_REVISION="$(git rev-parse --short HEAD)"
+          /usr/libexec/PlistBuddy -c "Add :DUMPSourceRevision string $SOURCE_REVISION" DUMP/DUMP/Info.plist
+          echo "Building DUMP source revision $SOURCE_REVISION"
+
           # Media
           cp MediaPreview.swift DUMP/DUMP/Media/MediaPreview.swift
           cp PhotosExporter.swift DUMP/DUMP/Media/PhotosExporter.swift

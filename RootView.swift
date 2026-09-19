@@ -50,6 +50,14 @@ struct RootView: View {
                     .buttonStyle(
                         PrimaryButton()
                     )
+
+                    if let revision = Bundle.main.object(
+                        forInfoDictionaryKey: "DUMPSourceRevision"
+                    ) as? String {
+                        Text("Build \(revision)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 .padding(40)
                 .transition(

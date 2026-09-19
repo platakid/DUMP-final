@@ -39,6 +39,19 @@ protocol KeyRecordStore {
 }
 
 
+// Preserve the actual Keychain failure instead of reporting a Face ID failure.
+struct KeychainReadError: LocalizedError {
+    let status: OSStatus
+
+    var errorDescription: String? {
+        if status == errSecMissingEntitlement {
+            return "This installation cannot access the Keychain (status \(status)). Re-sign the app with valid Keychain entitlements using the same signing identity as your existing installation."
+        }
+        let detail = SecCopyErrorMessageString(status, nil) as String? ?? "Unknown Keychain error"
+        return "Vault credentials could not be read: \(detail) (status \(status))."
+    }
+}
+
 // MARK: - Keychain implementation
 
 struct KeychainStore: KeyRecordStore {
@@ -92,10 +105,11 @@ struct KeychainStore: KeyRecordStore {
             return nil
         }
 
-        guard status == errSecSuccess,
-              let data = result as? Data
-        else {
-            throw VaultError.storage
+        guard status == errSecSuccess else {
+            throw KeychainReadError(status: status)
+        }
+        guard let data = result as? Data else {
+            throw VaultError.damaged
         }
 
         let record: KeyRecord

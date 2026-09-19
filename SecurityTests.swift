@@ -93,6 +93,34 @@ final class SecurityTests: XCTestCase {
         XCTAssertNil(records.record)
     }
 
+    @MainActor func testSuccessfulFaceIDReachesSetupWithoutRetry() async {
+        let auth = FakeDeviceAuth()
+        let records = MemoryRecords()
+        let model = AppModel(auth: auth, store: store, credentials: Credentials(store: records, hasMedia: { false }))
+        XCTAssertTrue(model.unlockDecoy("7002"))
+        model.reveal()
+        await model.enter()
+        XCTAssertEqual(model.route, .setup)
+        XCTAssertFalse(model.busy)
+        XCTAssertNil(model.message)
+        XCTAssertEqual(records.reads, 1)
+    }
+
+    @MainActor func testCredentialFailureIsDistinguishedFromFaceIDFailure() async {
+        struct UnavailableRecords: KeyRecordStore {
+            func read() throws -> KeyRecord? { throw VaultError.storage }
+            func insert(_ record: KeyRecord) throws { throw VaultError.storage }
+            func update(_ record: KeyRecord) throws { throw VaultError.storage }
+        }
+        let model = AppModel(auth: FakeDeviceAuth(), store: store, credentials: Credentials(store: UnavailableRecords(), hasMedia: { false }))
+        XCTAssertTrue(model.unlockDecoy("7002"))
+        model.reveal()
+        await model.enter()
+        XCTAssertEqual(model.route, .landing)
+        XCTAssertFalse(model.busy)
+        XCTAssertTrue(model.message?.hasPrefix("Face ID succeeded, but vault verification failed:") == true)
+    }
+
     @MainActor func testBackgroundRequiresDecoyTriggerAndBothGates() async {
         let auth = FakeDeviceAuth()
         let model = AppModel(auth: auth, store: store, credentials: Credentials(store: MemoryRecords(), hasMedia: { false }))
