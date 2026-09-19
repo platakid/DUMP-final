@@ -1,6 +1,6 @@
 workflows:
   dump-ios-unsigned:
-    name: DUMP - Unsigned device IPA (no signing, sign later yourself)
+    name: DUMP - Unsigned device IPA
     instance_type: mac_mini_m2
     max_build_duration: 60
 
@@ -8,53 +8,135 @@ workflows:
       xcode: latest
 
     scripts:
-      - name: Reconstruct Xcode project
+      - name: Prepare Xcode project structure
         script: |
           set -euo pipefail
-
           cd "$CM_BUILD_DIR"
 
-          echo "Reconstructing DUMP.xcodeproj..."
+          echo "Creating Xcode project..."
 
-          if [ ! -f "project.pbxproj" ]; then
-            echo "ERROR: project.pbxproj not found."
-            exit 1
-          fi
+          # --------------------------------------------------
+          # Reconstruct DUMP.xcodeproj
+          # --------------------------------------------------
 
           mkdir -p DUMP.xcodeproj/xcshareddata/xcschemes
 
-          cp project.pbxproj DUMP.xcodeproj/project.pbxproj
+          cp project.pbxproj \
+            DUMP.xcodeproj/project.pbxproj
 
-          if [ -f "DUMP.xcscheme" ]; then
-            cp DUMP.xcscheme \
-              DUMP.xcodeproj/xcshareddata/xcschemes/DUMP.xcscheme
-          fi
+          cp DUMP.xcscheme \
+            DUMP.xcodeproj/xcshareddata/xcschemes/DUMP.xcscheme
 
-          echo "Xcode project structure:"
-          find DUMP.xcodeproj -maxdepth 4 -type f -print
+          # --------------------------------------------------
+          # Create directory structure expected by pbxproj
+          # --------------------------------------------------
 
-          echo "Checking Xcode project..."
+          mkdir -p DUMP/DUMP/Media
+          mkdir -p DUMP/DUMP/Notes
+          mkdir -p DUMP/DUMP/Security
+          mkdir -p DUMP/DUMP/Storage
+          mkdir -p DUMP/DUMP/UI
+
+          # --------------------------------------------------
+          # Main application files
+          # --------------------------------------------------
+
+          cp AppModel.swift DUMP/DUMP/AppModel.swift
+          cp DUMPApp.swift DUMP/DUMP/DUMPApp.swift
+          cp Info.plist DUMP/DUMP/Info.plist
+
+          # --------------------------------------------------
+          # Media
+          # --------------------------------------------------
+
+          cp MediaPreview.swift DUMP/DUMP/Media/MediaPreview.swift
+          cp PhotosExporter.swift DUMP/DUMP/Media/PhotosExporter.swift
+          cp PhotosImporter.swift DUMP/DUMP/Media/PhotosImporter.swift
+          cp SecureCamera.swift DUMP/DUMP/Media/SecureCamera.swift
+          cp SecureVideoContainer.swift DUMP/DUMP/Media/SecureVideoContainer.swift
+          cp SecureVideoEncoder.swift DUMP/DUMP/Media/SecureVideoEncoder.swift
+          cp SecureVideoPlayback.swift DUMP/DUMP/Media/SecureVideoPlayback.swift
+
+          # --------------------------------------------------
+          # Notes
+          # --------------------------------------------------
+
+          cp NoteEditor.swift DUMP/DUMP/Notes/NoteEditor.swift
+          cp NotesStore.swift DUMP/DUMP/Notes/NotesStore.swift
+
+          # --------------------------------------------------
+          # Security
+          # --------------------------------------------------
+
+          cp Crypto.swift DUMP/DUMP/Security/Crypto.swift
+          cp DeviceAuthentication.swift DUMP/DUMP/Security/DeviceAuthentication.swift
+          cp KeychainStore.swift DUMP/DUMP/Security/KeychainStore.swift
+
+          # --------------------------------------------------
+          # Storage
+          # --------------------------------------------------
+
+          cp MediaStore.swift DUMP/DUMP/Storage/MediaStore.swift
+
+          # --------------------------------------------------
+          # UI
+          # --------------------------------------------------
+
+          cp RootView.swift DUMP/DUMP/UI/RootView.swift
+          cp VaultView.swift DUMP/DUMP/UI/VaultView.swift
+
+          # --------------------------------------------------
+          # Create Assets.xcassets
+          # --------------------------------------------------
+
+          mkdir -p DUMP/DUMP/Assets.xcassets/AppIcon.appiconset
+
+          cat > DUMP/DUMP/Assets.xcassets/Contents.json <<'EOF'
+          {
+            "info" : {
+              "author" : "xcode",
+              "version" : 1
+            }
+          }
+          EOF
+
+          cp Icon-1024.png \
+            DUMP/DUMP/Assets.xcassets/AppIcon.appiconset/Icon-1024.png
+
+          cat > DUMP/DUMP/Assets.xcassets/AppIcon.appiconset/Contents.json <<'EOF'
+          {
+            "images" : [
+              {
+                "filename" : "Icon-1024.png",
+                "idiom" : "universal",
+                "platform" : "ios",
+                "size" : "1024x1024"
+              }
+            ],
+            "info" : {
+              "author" : "xcode",
+              "version" : 1
+            }
+          }
+          EOF
+
+          echo "Project structure created."
+
+          find DUMP -maxdepth 4 -type f -print
+
+      - name: Resolve Swift packages
+        script: |
+          set -euo pipefail
+          cd "$CM_BUILD_DIR"
 
           xcodebuild \
             -project DUMP.xcodeproj \
             -scheme DUMP \
             -resolvePackageDependencies
 
-      - name: Check available schemes
-        script: |
-          set -euo pipefail
-
-          cd "$CM_BUILD_DIR"
-
-          echo "Available Xcode configuration:"
-          xcodebuild \
-            -project DUMP.xcodeproj \
-            -list
-
       - name: Build DUMP
         script: |
           set -euo pipefail
-
           cd "$CM_BUILD_DIR"
 
           mkdir -p build/logs
@@ -62,6 +144,7 @@ workflows:
           xcodebuild \
             -project DUMP.xcodeproj \
             -scheme DUMP \
+            -configuration Release \
             -sdk iphoneos \
             -destination "generic/platform=iOS" \
             CODE_SIGNING_ALLOWED=NO \
@@ -74,7 +157,6 @@ workflows:
       - name: Archive DUMP
         script: |
           set -euo pipefail
-
           cd "$CM_BUILD_DIR"
 
           mkdir -p build/ios
@@ -83,6 +165,7 @@ workflows:
           xcodebuild archive \
             -project DUMP.xcodeproj \
             -scheme DUMP \
+            -configuration Release \
             -sdk iphoneos \
             -archivePath build/ios/DUMP.xcarchive \
             -destination "generic/platform=iOS" \
@@ -96,36 +179,31 @@ workflows:
       - name: Create unsigned IPA
         script: |
           set -euo pipefail
-
           cd "$CM_BUILD_DIR"
 
-          APP_PATH="build/ios/DUMP.xcarchive/Products/Applications/DUMP.app"
+          APP="build/ios/DUMP.xcarchive/Products/Applications/DUMP.app"
 
-          if [ ! -d "$APP_PATH" ]; then
-            echo "ERROR: DUMP.app was not generated."
-
-            echo "Available .app files:"
+          if [ ! -d "$APP" ]; then
+            echo "ERROR: DUMP.app was not produced."
             find build -name "*.app" -print || true
-
             exit 1
           fi
 
           rm -rf build/ios/ipa
           mkdir -p build/ios/ipa/Payload
 
-          cp -R "$APP_PATH" \
-            build/ios/ipa/Payload/DUMP.app
+          cp -R "$APP" build/ios/ipa/Payload/DUMP.app
 
           cd build/ios/ipa
 
           zip -r DUMP-unsigned.ipa Payload
 
-          echo ""
-          echo "=============================="
-          echo "IPA CREATED SUCCESSFULLY"
-          echo "=============================="
+          echo "================================"
+          echo "DUMP-unsigned.ipa CREATED"
+          echo "================================"
+
           ls -lh DUMP-unsigned.ipa
 
     artifacts:
-      - build/ios/ipa/*.ipa
+      - build/ios/ipa/DUMP-unsigned.ipa
       - build/logs/*.log
