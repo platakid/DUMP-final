@@ -36,8 +36,6 @@ final class AppModel: ObservableObject {
     private var master: SecretBytes?
     private var gate1Succeeded = false
 
-    // Every asynchronous security-sensitive operation captures the current
-    // generation. lock() increments it so old callbacks become invalid.
     private var generation: UInt64 = 0
 
     private let importer = PhotosImporter()
@@ -70,8 +68,6 @@ final class AppModel: ObservableObject {
             return false
         }
 
-        // This public, predetermined UI code is NOT a vault passcode
-        // or cryptographic gate.
         guard input == "7002" else {
             return false
         }
@@ -116,43 +112,12 @@ final class AppModel: ObservableObject {
             isAuthenticating = false
         }
 
+        // STEP 1 — Face ID / device authentication
         do {
             guard try await auth.authenticate() else {
                 throw VaultError.locked
             }
-
-            // SECURITY:
-            // Authentication may have completed after lock() was called.
-            // In that situation the old result MUST NOT reopen the session.
-            guard ticket == generation,
-                  route == .gate1,
-                  lease === current else {
-                return
-            }
-
-            try current.check()
-
-            gate1Succeeded = true
-
-            let existing = try await credentials.exists(
-                lease: current
-            )
-
-            // Check again because credentials.exists() is asynchronous.
-            // The session may have been locked while awaiting it.
-            guard ticket == generation,
-                  gate1Succeeded,
-                  route == .gate1,
-                  lease === current else {
-                return
-            }
-
-            route = existing ? .gate2 : .setup
-            busy = false
-
         } catch {
-            // Ignore errors produced by an authentication operation
-            // belonging to an older, already-locked session.
             guard ticket == generation else {
                 return
             }
@@ -160,12 +125,73 @@ final class AppModel: ObservableObject {
             current.revoke()
             lease = nil
             gate1Succeeded = false
-
             route = .landing
             busy = false
 
             message =
-                "Authentication did not complete. Press Enter to try again."
+                "Face ID failed: \(error.localizedDescription)"
+
+            return
+        }
+
+        // Authentication itself succeeded.
+        // Make sure the security session was not invalidated while
+        // the system Face ID UI was active.
+        guard ticket == generation,
+              route == .gate1,
+              lease === current else {
+
+            current.revoke()
+
+            if ticket == generation {
+                lease = nil
+                gate1Succeeded = false
+                route = .landing
+                busy = false
+
+                message =
+                    "Face ID succeeded, but the authentication session was invalidated."
+            }
+
+            return
+        }
+
+        do {
+            try current.check()
+
+            gate1Succeeded = true
+
+            // STEP 2 — Check whether vault credentials already exist.
+            let existing = try await credentials.exists(
+                lease: current
+            )
+
+            guard ticket == generation,
+                  gate1Succeeded,
+                  route == .gate1,
+                  lease === current else {
+
+                throw VaultError.locked
+            }
+
+            try current.check()
+
+            route = existing ? .gate2 : .setup
+            busy = false
+
+        } catch {
+            guard ticket == generation else {
+                return
+            }
+
+            current.revoke()
+            lease = nil
+            gate1Succeeded = false
+            route = .landing
+            busy = false
+
+            message =
+                "Face ID succeeded, but vault verification failed: \(error.localizedDescription)"
         }
     }
 
@@ -258,8 +284,6 @@ final class AppModel: ObservableObject {
             busy = false
             message = error.localizedDescription
 
-            // Setup may have persisted its verifier before
-            // a later step failed.
             if setup,
                (try? await credentials.exists(lease: lease)) == true,
                ticket == generation,
@@ -342,43 +366,20 @@ final class AppModel: ObservableObject {
 
     // MARK: - Security Lock
 
-    /// Called synchronously after the native privacy cover has been installed.
     func lock() {
 
-        // SECURITY FIX:
-        //
-        // lock() MUST work even while Gate 1 authentication is running.
-        //
-        // Previously:
-        //
-        //     guard !isAuthenticating else { return }
-        //
-        // prevented the application from locking while authentication was
-        // active. A late successful Gate 1 callback could therefore move
-        // the application to .setup after a lock had been requested.
-        //
-        // Incrementing generation invalidates every asynchronous operation
-        // belonging to the previous session.
         generation &+= 1
 
-        // Enter the locked state immediately.
         route = .decoyLock
         gate1Succeeded = false
         busy = false
 
-        // Attempt to cancel native authentication.
-        //
-        // Even if cancellation races with a successful authentication,
-        // generation checks in enter() prevent that stale result from
-        // reopening this session.
         auth.cancel()
 
-        // Revoke permission to decrypt BEFORE waiting for any UI,
-        // importer, preview, or renderer cleanup.
-        // Camera has a separate lease/master copy; revoke it synchronously too.
         camera?.cancel()
         camera = nil
         showingCamera = false
+
         lease?.revoke()
         lease = nil
 
@@ -440,7 +441,8 @@ final class AppModel: ObservableObject {
 
     func show(_ item: MediaInfo) async {
         guard route == .vault,
-              !busy, camera == nil,
+              !busy,
+              camera == nil,
               let master,
               let lease,
               let store else {
@@ -484,51 +486,93 @@ final class AppModel: ObservableObject {
         }
     }
 
-    // MARK: - Secure camera
+    // MARK: - Secure Camera
 
     func openCamera() {
-        guard route == .vault, !busy, camera == nil,
+        guard route == .vault,
+              !busy,
+              camera == nil,
               UIApplication.shared.applicationState == .active,
               !UIScreen.screens.contains(where: \.isCaptured),
-              let store, let master, let lease else { return }
+              let store,
+              let master,
+              let lease else {
+            return
+        }
+
         let ticket = generation
+
         do {
             try lease.check()
             preview.clear()
-            let camera = try SecureCamera(store: store, master: master) { [weak self] item in
-                guard let self, self.generation == ticket, self.route == .vault else { return }
-                // Publish only after the writer verified and committed the object.
+
+            let camera = try SecureCamera(
+                store: store,
+                master: master
+            ) { [weak self] item in
+
+                guard let self,
+                      self.generation == ticket,
+                      self.route == .vault else {
+                    return
+                }
+
                 self.media.insert(item, at: 0)
             }
+
             self.camera = camera
             showingCamera = true
-        } catch { message = "The secure camera could not open." }
+
+        } catch {
+            message = "The secure camera could not open."
+        }
     }
 
-    func capturePhoto() { camera?.capturePhoto() }
-    func startVideo() { camera?.startVideo() }
-    func stopVideo() { camera?.stopVideo() }
+    func capturePhoto() {
+        camera?.capturePhoto()
+    }
+
+    func startVideo() {
+        camera?.startVideo()
+    }
+
+    func stopVideo() {
+        camera?.stopVideo()
+    }
 
     func closeCamera() {
-        guard let camera else { showingCamera = false; return }
+        guard let camera else {
+            showingCamera = false
+            return
+        }
+
         let ticket = generation
         busy = true
+
         camera.cancel { [weak self] in
-            guard let self, self.generation == ticket, self.route == .vault else { return }
+            guard let self,
+                  self.generation == ticket,
+                  self.route == .vault else {
+                return
+            }
+
             self.busy = false
-            Task { await self.refresh() }
+
+            Task {
+                await self.refresh()
+            }
         }
+
         self.camera = nil
         showingCamera = false
-        // A save may have committed just before Cancel invalidated its UI callback.
-        // Refresh from authenticated storage; unfinished partials are never listed.
     }
 
-    // Temporary inactivity must discard capture without disrupting Face ID or
-    // weakening the existing background lock. Initial permission prompts have
-    // not started recording, so they can complete normally.
     func suspendCameraCapture() {
-        if camera?.ready == true, camera?.requestingPermission == false { closeCamera() }
+        if camera?.ready == true,
+           camera?.requestingPermission == false {
+
+            closeCamera()
+        }
     }
 
     // MARK: - Photos Library
@@ -627,8 +671,6 @@ final class AppModel: ObservableObject {
                 return
             }
 
-            // Issued only after EVERY resource
-            // has been verified.
             importedAsset = asset
             askToDeleteOriginal = true
             busy = false
@@ -665,8 +707,6 @@ final class AppModel: ObservableObject {
         do {
             try lease.check()
 
-            // User has explicitly chosen Delete
-            // in the in-app confirmation dialog.
             try await PHPhotoLibrary.shared().performChanges {
                 PHAssetChangeRequest.deleteAssets(
                     [asset] as NSArray
@@ -751,8 +791,6 @@ final class AppModel: ObservableObject {
             }
         }
 
-        // No extra Gate 2 prompt:
-        // the user explicitly approved using this live session.
         do {
             try lease.check()
 
@@ -789,7 +827,6 @@ final class AppModel: ObservableObject {
                 busy = false
                 message = notice
             } else {
-                // Show only after a later successful unlock.
                 pendingExportNotice = notice
             }
 
