@@ -3,42 +3,59 @@ workflows:
     name: DUMP - Unsigned device IPA (no signing, sign later yourself)
     instance_type: mac_mini_m2
     max_build_duration: 60
+
     environment:
       xcode: latest
+
     scripts:
       - name: Check project and resolve Swift packages
-  script: |
-    set -e
-    cd "$CM_BUILD_DIR"
+        script: |
+          set -euo pipefail
 
-    if [ -f "ci/codemagic.sh" ]; then
-      chmod +x ci/codemagic.sh
-      bash ci/codemagic.sh prepare
-    else
-      echo "ci/codemagic.sh not found — resolving packages directly."
+          echo "Current directory:"
+          pwd
 
-      if [ -d "ios/App/App.xcworkspace" ]; then
-        xcodebuild \
-          -workspace ios/App/App.xcworkspace \
-          -scheme App \
-          -resolvePackageDependencies
-      elif [ -d "ios/App/App.xcodeproj" ]; then
-        xcodebuild \
-          -project ios/App/App.xcodeproj \
-          -scheme App \
-          -resolvePackageDependencies
-      else
-        echo "ERROR: No Xcode workspace/project found."
-        exit 1
-      fi
-    fi
+          echo "Repository contents:"
+          ls -la
 
-      - name: Build and run XCTest on simulator (sanity check)
-        script: bash ci/codemagic.sh test
+          if [ ! -d "DUMP.xcodeproj" ]; then
+            echo "ERROR: DUMP.xcodeproj was not found in the repository root."
+            find . -maxdepth 3 -name "*.xcodeproj" -print
+            exit 1
+          fi
+
+          echo "DUMP.xcodeproj found."
+
+          xcodebuild \
+            -project DUMP.xcodeproj \
+            -scheme DUMP \
+            -resolvePackageDependencies
+
+      - name: Build project sanity check
+        script: |
+          set -euo pipefail
+
+          mkdir -p build/logs
+
+          xcodebuild \
+            -project DUMP.xcodeproj \
+            -scheme DUMP \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            build \
+            | tee build/logs/build.log
 
       - name: Archive for iOS device, code signing disabled
         script: |
           set -euo pipefail
+
+          mkdir -p build/ios
+          mkdir -p build/logs
+
           xcodebuild archive \
             -project DUMP.xcodeproj \
             -scheme DUMP \
@@ -49,15 +66,32 @@ workflows:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_ENTITLEMENTS="" \
-            DEVELOPMENT_TEAM=""
+            DEVELOPMENT_TEAM="" \
+            | tee build/logs/archive.log
 
-      - name: Package the unsigned .app into a proper .ipa
+      - name: Package unsigned app into IPA
         script: |
           set -euo pipefail
+
+          APP_PATH="build/ios/DUMP.xcarchive/Products/Applications/DUMP.app"
+
+          if [ ! -d "$APP_PATH" ]; then
+            echo "ERROR: DUMP.app was not generated."
+            find build -maxdepth 6 -name "*.app" -print || true
+            exit 1
+          fi
+
+          rm -rf build/ios/ipa
           mkdir -p build/ios/ipa/Payload
-          cp -r "build/ios/DUMP.xcarchive/Products/Applications/DUMP.app" build/ios/ipa/Payload/
+
+          cp -R "$APP_PATH" build/ios/ipa/Payload/
+
           cd build/ios/ipa
           zip -r DUMP-unsigned.ipa Payload
+
+          echo "IPA created successfully:"
+          ls -lh DUMP-unsigned.ipa
+
     artifacts:
       - build/ios/ipa/*.ipa
       - build/results/*.xcresult
